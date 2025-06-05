@@ -7,6 +7,9 @@
 
 #include "lib/ssd1306.h"
 #include "lib/font.h"
+#include "lib/animations.h"
+#include "lib/ws2818b.h"
+#include "ws2818b.pio.h"
 
 #include "hardware/gpio.h"          // Biblioteca de hardware de GPIO
 #include "hardware/irq.h"           // Biblioteca de hardware de interrupções
@@ -19,11 +22,12 @@
 #include "lwip/dns.h"               // Biblioteca que fornece funções e recursos suporte DNS:
 #include "lwip/altcp_tls.h"         // Biblioteca que fornece funções e recursos para conexões seguras usando TLS:
 
-#define WIFI_SSID "JR TELECOM-LAR" // Substitua pelo nome da sua rede Wi-Fi
-#define WIFI_PASSWORD "Rama2000"   // Substitua pela senha da sua rede Wi-Fi
-#define MQTT_SERVER "192.168.1.5"  // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
-#define MQTT_USERNAME "gabrielshiva" // Substitua pelo nome da host MQTT - Username
-#define MQTT_PASSWORD "100936"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+
+#define WIFI_SSID "XXXX" // Substitua pelo nome da sua rede Wi-Fi
+#define WIFI_PASSWORD "XXXX"   // Substitua pela senha da sua rede Wi-Fi
+#define MQTT_SERVER "XXXX"  // Substitua pelo endereço do host - broket MQTT: Ex: 192.168.1.107
+#define MQTT_USERNAME "XXXX" // Substitua pelo nome da host MQTT - Username
+#define MQTT_PASSWORD "XXXX"     // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
 
 // Definição de macros para o protocolo I2C (SSD1306)
 #define I2C_PORT i2c1
@@ -36,18 +40,27 @@ ssd1306_t ssd;
 
 // Armazena o texto que será exibido no display OLED
 char display_text[40] = {0};
+volatile bool display_color = true;
+volatile bool volume_reached_end = false;
 
 // Define os pinos dos botões
 #define BUZZER_PIN 21 // Buzzer de alerta quando o valor de infusão for superior ao definido
-#define INFUSION_RATE_PIN 27 // Representa a taxa de infusão atual (ml/H)
-#define VOL_PIN 26 // Representa o volume total atual
-#define LED_RED 12 // led de alerta quando o valor de infusão for superior ao definido
+#define INFUSION_RATE_PIN 26 // Representa a taxa de infusão atual (ml/H)
+#define VOL_PIN 28 // Representa o volume total atual
+#define LED_RED 13 // led de alerta quando o valor de infusão for superior ao definido
 
 #define MAX_INFUSION_RATE 90.0f
+
+float rate = 0.0f;
+float vol = 0.0f;
 
 // Flag que define se a taxa de infusão está acima do permitido
 volatile bool is_over_limit = false;
 volatile bool is_infusion_active = false;
+
+uint32_t led_timer = 0;
+uint32_t motor_simulation_timer = 0;
+uint counter = 0;
 
 // Define variável para debounce do botão
 volatile uint32_t last_time_btn_press = 0;
@@ -152,6 +165,10 @@ int main() {
     stdio_init_all();
     printf("Iniciando cliente mqtt\n");
 
+    npInit(LED_PIN);
+    npClear();
+    npWrite();
+
     adc_init();
     adc_gpio_init(INFUSION_RATE_PIN);
     adc_gpio_init(VOL_PIN);
@@ -164,8 +181,7 @@ int main() {
     i2c_setup(400);
     ssd1306_setup(&ssd);
 
-    bool color = true;
-    ssd1306_fill(&ssd, !color);
+    ssd1306_fill(&ssd, !display_color);
     ssd1306_draw_string(&ssd, "Inicializando", 5, 20);
     ssd1306_draw_string(&ssd, "MQTT", 5, 30);
     ssd1306_send_data(&ssd);
@@ -206,7 +222,7 @@ int main() {
 
     // Inicializa a arquitetura do cyw43
     if (cyw43_arch_init()) {
-        ssd1306_fill(&ssd, !color);
+        ssd1306_fill(&ssd, !display_color);
         ssd1306_draw_string(&ssd, "Falha ao", 5, 20);
         ssd1306_draw_string(&ssd, "Inicializar", 5, 30);
         ssd1306_draw_string(&ssd, "CYW43", 5, 40);
@@ -215,7 +231,7 @@ int main() {
         panic("Falha ao inicializar o CYW43");
     }
 
-    ssd1306_fill(&ssd, !color);
+    ssd1306_fill(&ssd, !display_color);
     ssd1306_draw_string(&ssd, "Conectando em", 5, 20);
     snprintf(display_text, sizeof(display_text), "%s", WIFI_SSID);
     ssd1306_draw_string(&ssd, display_text, 5, 30);
@@ -225,7 +241,7 @@ int main() {
     // Conectar à rede WiFI - fazer um loop até que esteja conectado
     cyw43_arch_enable_sta_mode();
     if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000)) {
-        ssd1306_fill(&ssd, !color);
+        ssd1306_fill(&ssd, !display_color);
         ssd1306_draw_string(&ssd, "Falha ao", 5, 20);
         ssd1306_draw_string(&ssd, "Conectar na", 5, 30);
         ssd1306_draw_string(&ssd, "Rede WiFi", 5, 40);
@@ -234,7 +250,7 @@ int main() {
         panic("Falha ao conectar na rede");
     }
 
-    ssd1306_fill(&ssd, !color);
+    ssd1306_fill(&ssd, !display_color);
     ssd1306_draw_string(&ssd, "Conectado", 5, 20);
     ssd1306_draw_string(&ssd, "Com sucesso", 5, 30);
     ssd1306_send_data(&ssd);
@@ -254,8 +270,19 @@ int main() {
         panic("Requisição DNS falhou");
     }
 
-    ssd1306_fill(&ssd, !color);
+    ssd1306_fill(&ssd, !display_color);
     ssd1306_send_data(&ssd);
+
+    ssd1306_fill(&ssd, !display_color);
+    ssd1306_rect(&ssd, 2, 2, 124, 62, true, false);
+    ssd1306_draw_string(&ssd, "CONTROLE DE", 4, 6);
+    ssd1306_draw_string(&ssd, "INFUSAO", 4, 14);
+    ssd1306_line(&ssd, 3, 23, 123, 23, true); // linha horizontal - primeira
+    ssd1306_draw_string(&ssd, "DESATIVADA", 23, 40);
+    ssd1306_send_data(&ssd);
+
+    gpio_put(LED_RED, 0);
+    char buffer[32];
 
     // Loop condicionado a conexão mqtt
     while (!state.connect_done || mqtt_client_is_connected(state.mqtt_client_inst)) {
@@ -263,23 +290,67 @@ int main() {
         cyw43_arch_wait_for_work_until(make_timeout_time_ms(10000));
 
         if (is_infusion_active) {
-            ssd1306_fill(&ssd, !color);
-            ssd1306_draw_string(&ssd, "INFUSAO", 5, 20);
-            ssd1306_draw_string(&ssd, "ATIVADA", 5, 30);
+            ssd1306_fill(&ssd, !display_color);
+            ssd1306_rect(&ssd, 2, 2, 124, 62, true, false);
+            ssd1306_draw_string(&ssd, "CONTROLE DE", 4, 6);
+            ssd1306_draw_string(&ssd, "INFUSAO", 4, 14);
+            ssd1306_line(&ssd, 3, 23, 123, 23, true); // linha horizontal - primeira
+            ssd1306_line(&ssd, 3, 46, 123, 46, true); // linha horizontal - segunda
+            ssd1306_line(&ssd, 61, 23, 61, 46, true); // linha vertical
+            ssd1306_draw_string(&ssd, "Taxa", 4, 25);
+            sprintf(buffer, "%.0f ml/H", rate);
+            ssd1306_draw_string(&ssd, buffer, 64, 25);
+            ssd1306_draw_string(&ssd, "Volume", 4, 35);
+            sprintf(buffer, "%.0f ml", vol);
+            ssd1306_draw_string(&ssd, buffer, 64, 35);
             ssd1306_send_data(&ssd);
 
-             if (is_over_limit) {
-                gpio_put(LED_RED, 1);
+            if ((to_ms_since_boot(get_absolute_time()) - motor_simulation_timer > 75)) {
+                motor_simulation_timer = to_ms_since_boot(get_absolute_time());
+                npClear();
+                npWrite();
+
+                for (int j = 24; j >= 0; j--) {
+                    if (animations[counter][j]) {
+                        npSetLED(j, 20, 20, 20);
+                        printf("index: %d", j);
+                    }
+                }
+
+                npWrite();
+                counter = (counter + 1) % 8;
+            }
+
+            if (is_over_limit) {
+                if (to_ms_since_boot(get_absolute_time()) - led_timer > 600) {
+                    led_timer = to_ms_since_boot(get_absolute_time());
+                    gpio_put(LED_RED, 1);
+                } else {
+                    gpio_put(LED_RED, 0);
+                }
+
+                ssd1306_rect(&ssd, 48, 3, 118, 10, true, true);
+                ssd1306_rect(&ssd, 48, 3, 118, 10, false, true);
+                ssd1306_draw_string(&ssd, "TAXA ESTA ACIMA", 3, 48);
+                ssd1306_send_data(&ssd);
             } else {
                 gpio_put(LED_RED, 0);
             }
-        }
-
-        if (!is_infusion_active) {
-            ssd1306_fill(&ssd, !color);
-            ssd1306_draw_string(&ssd, "INFUSAO", 5, 20);
-            ssd1306_draw_string(&ssd, "DESATIVADA", 5, 30);
+        } else {
+            ssd1306_fill(&ssd, !display_color);
+            ssd1306_rect(&ssd, 2, 2, 124, 62, true, false);
+            ssd1306_draw_string(&ssd, "CONTROLE DE", 4, 6);
+            ssd1306_draw_string(&ssd, "INFUSAO", 4, 14);
+            ssd1306_line(&ssd, 3, 23, 123, 23, true); // linha horizontal - primeira
+            if (volume_reached_end) {
+                ssd1306_draw_string(&ssd, "ENCERRADA", 23, 40);
+            } else {
+                ssd1306_draw_string(&ssd, "DESATIVADA", 23, 40);
+            }
             ssd1306_send_data(&ssd);
+
+            npClear();
+            npWrite();
 
             gpio_put(LED_RED, 0);
         }
@@ -301,8 +372,8 @@ static float read_infusion_values(uint input_selection) {
         return adc_transformation(adc_read(), 1.0, 100.0);
     }
 
-    if (input_selection == 1) {
-        adc_select_input(1);
+    if (input_selection == 2) {
+        adc_select_input(2);
         return adc_transformation(adc_read(), 5.0, 500.0);
     }
 
@@ -319,13 +390,21 @@ static void publish_infusion_values(MQTT_CLIENT_DATA_T *state) {
     const char *infusion_volume_key = full_topic(state, "/infusion/volume");
 
     // Realiza as leituras dos valores pelo joystick
-    float rate = read_infusion_values(0);
-    float vol = read_infusion_values(1);
+    rate = read_infusion_values(0);
+    vol = read_infusion_values(2);
 
+    // Verifica se a taxa de infusão está acima do definido (90 ml/H). Caso esteja, a flag é definida como verdadeira
     if (rate > MAX_INFUSION_RATE) {
         is_over_limit = true;
     } else {
         is_over_limit = false;
+    }
+
+    // Caso o volume atual de infusão tenha atingido o valor de 98%. A infusão é encerrada.
+    if (vol >= 490.0f) {
+        is_infusion_active = false;
+        volume_reached_end = true;
+        counter = 0;
     }
 
     // Verifica se os valores foram atualizados
@@ -431,8 +510,6 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
     state->len = len;
     state->data[len] = '\0';
 
-    bool color  = true;
-
     printf("Topic: %s, Message: %s\n", state->topic, state->data);
 
     if (strcmp(basic_topic, "/infusion/state") == 0) {
@@ -440,6 +517,8 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
             is_infusion_active = true;
         } else if (lwip_stricmp((const char *)state->data, "Off") == 0 || strcmp((const char *)state->data, "0") == 0) {
             is_infusion_active = false;
+            volume_reached_end = false;
+            counter = 0;
         }
     } else if (strcmp(basic_topic, "/exit") == 0) {
         state->stop_client = true; // stop the client when ALL subscriptions are stopped
